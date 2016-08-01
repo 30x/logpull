@@ -29,8 +29,13 @@ spec:
           value: "8000"
         - name: AUTH_API_HOST
           value: "api.e2e.apigee.net"
-        - name: SEARCH_TARGET
+        - name: ELASTIC_SEARCH_HOST
           valueFrom:
             secretKeyRef:
               name: elastic-search-loc
-              key: loc
+              key: host
+        - name: ELASTIC_SEARCH_PORT
+          valueFrom:
+            secretKeyRef:
+              name: elastic-search-loc
+              key: port

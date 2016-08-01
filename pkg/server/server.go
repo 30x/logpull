@@ -15,8 +15,10 @@ import (
 
 // Port the port the server is listening on
 var Port string
-// Target is the location of the elastic search pod
-var Target string
+// ElasticSearchHost is the host name of the elastic search pod
+var ElasticSearchHost string
+// ElasticSearchPort  is the port of the elastic search pod
+var ElasticSearchPort string
 
 // DefaultPort is the default port to listen
 const DefaultPort = "8000"
@@ -42,8 +44,12 @@ func NewServer() (server *Server, err error) {
     Port = DefaultPort
   }
 
-  if Target = os.Getenv("SEARCH_TARGET"); Target == "" {
-    return nil, errors.New("No SEARCH_TARGET set! Cannot query for logs without this!")
+  if ElasticSearchHost = os.Getenv("ELASTIC_SEARCH_HOST"); ElasticSearchHost == "" {
+    return nil, errors.New("No ELASTIC_SEARCH_HOST set! Cannot query for logs without this!")
+  }
+
+  if ElasticSearchPort = os.Getenv("ELASTIC_SEARCH_PORT"); ElasticSearchPort == "" {
+    return nil, errors.New("No ELASTIC_SEARCH_PORT set! Cannot query for logs without this!")
   }
 
   return server, nil
@@ -69,7 +75,9 @@ func getDeploymentLogs(w http.ResponseWriter, r *http.Request) {
   logReq.Dep = pathVars["dep"]
   logReq.Namespace = logReq.Org + "-" + logReq.Env
 
-  req, err := http.NewRequest("GET", "http://" + Target, nil)
+  target := fmt.Sprintf("http://%s:%s/", ElasticSearchHost, ElasticSearchPort)
+
+  req, err := http.NewRequest("GET", target, nil)
   if err != nil {
     writeErrorResponse(http.StatusInternalServerError, err.Error(), w)
     return
