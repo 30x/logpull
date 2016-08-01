@@ -1,0 +1,36 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: logpull
+  labels:
+    name: logpull
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: logpull
+  template:
+    metadata:
+      labels:
+        name: logpull
+        routable: "true"
+      annotations:
+        publicHosts: "shipyard.e2e.apigee.net"
+        publicPaths: "8000:/logs"
+        privateHosts: "shipyard.e2e.apigee.net"
+        privatePaths: "8000:/logs"
+    spec:
+      containers:
+      - image: thirtyx/logpull:dev
+        imagePullPolicy: Always
+        name: logpull
+        env:
+        - name: PORT
+          value: "8000"
+        - name: AUTH_API_HOST
+          value: "api.e2e.apigee.net"
+        - name: SEARCH_TARGET
+          valueFrom:
+            secretKeyRef:
+              name: elastic-search-loc
+              key: loc
