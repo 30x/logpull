@@ -2,11 +2,12 @@ package server
 
 import (
   "os"
-  "io"
+  "io/ioutil"
   "fmt"
   "errors"
   "net/http"
   "encoding/json"
+  "strconv"
 
   "github.com/gorilla/handlers"
   "github.com/gorilla/mux"
@@ -19,9 +20,15 @@ var Port string
 var ElasticSearchHost string
 // ElasticSearchPort  is the port of the elastic search pod
 var ElasticSearchPort string
+// HitLimit the limit on the number of hits that can be pulled at one time
+var HitLimit int
 
-// DefaultPort is the default port to listen
-const DefaultPort = "8000"
+const (
+  // DefaultPort is the default port to listen
+  DefaultPort = "8000"
+  // DefaultHitLimit is the default limit on the number of hits that can be pulled at one time
+  DefaultHitLimit = 1024
+)
 
 //Server struct
 type Server struct {
@@ -44,13 +51,20 @@ func NewServer() (server *Server, err error) {
     Port = DefaultPort
   }
 
+  if HitLimitStr := os.Getenv("HIT_LIMIT"); HitLimitStr == "" {
+    HitLimit = DefaultHitLimit
+  } else {
+    HitLimit, err = strconv.Atoi(HitLimitStr)
+    if err != nil {
+      HitLimit = DefaultHitLimit
+    }
+  }
+
   if ElasticSearchHost = os.Getenv("ELASTIC_SEARCH_HOST"); ElasticSearchHost == "" {
     return nil, errors.New("No ELASTIC_SEARCH_HOST set! Cannot query for logs without this!")
   }
 
-  if ElasticSearchPort = os.Getenv("ELASTIC_SEARCH_PORT"); ElasticSearchPort == "" {
-    return nil, errors.New("No ELASTIC_SEARCH_PORT set! Cannot query for logs without this!")
-  }
+  ElasticSearchPort = os.Getenv("ELASTIC_SEARCH_PORT")
 
   return server, nil
 }
@@ -75,22 +89,16 @@ func getDeploymentLogs(w http.ResponseWriter, r *http.Request) {
   logReq.Dep = pathVars["dep"]
   logReq.Namespace = logReq.Org + "-" + logReq.Env
 
-  target := fmt.Sprintf("http://%s:%s/", ElasticSearchHost, ElasticSearchPort)
-
-  req, err := http.NewRequest("GET", target, nil)
+  tail, err := strconv.Atoi(r.URL.Query().Get("tail"))
   if err != nil {
-    writeErrorResponse(http.StatusInternalServerError, err.Error(), w)
+    writeErrorResponse(http.StatusBadRequest, err.Error(), w)
     return
   }
+  logReq.Tail = tail
 
-  res, err := http.DefaultClient.Do(req)
+  total, err := probeForLogs(logReq)
   if err != nil {
     writeErrorResponse(http.StatusInternalServerError, err.Error(), w)
-    return
-  }
-
-  if res.StatusCode < 200 && res.StatusCode >= 300 {
-    writeErrorResponse(res.StatusCode, res.Status, w)
     return
   }
 
@@ -98,13 +106,135 @@ func getDeploymentLogs(w http.ResponseWriter, r *http.Request) {
   w.Header().Set("X-Content-Type-Options", "nosniff")
   w.WriteHeader(http.StatusOK)
 
-  _, err = io.Copy(w, res.Body)
-  if err != nil {
-    writeErrorResponse(http.StatusInternalServerError, err.Error(), w)
+  flusher, ok := w.(http.Flusher)
+  if !ok {
+    writeErrorResponse(http.StatusInternalServerError, "expected http.ResponseWriter to an http.Flusher", w)
     return
   }
 
-  return
+  flusher.Flush()
+
+  if total == 0 {
+    w.Write([]byte("There are no logs available\n"))
+  } else {
+    logReq.TotalHits = total
+
+    err = pullAndWriteLogs(w, flusher, logReq)
+    if err != nil {
+      w.Write([]byte(err.Error()))
+    }
+  }
+}
+
+func pullAndWriteLogs(w http.ResponseWriter, flusher http.Flusher, logReq *logRequest) error {
+  fmt.Printf("Pulling and Writing logs: %v\n", logReq)
+  if logReq.Tail == 0 { // get all existing logs
+    if logReq.TotalHits >= HitLimit {
+      remaining := 0
+
+      for remaining < logReq.TotalHits {
+        res, err := pullLogBlock(logReq, HitLimit, remaining)
+        if err != nil {
+          return err
+        }
+
+        writeLogBlock(res, w)
+        flusher.Flush()
+
+        remaining += HitLimit
+      }
+    } else {
+      // total hits is less than our hit pull limit, so grab them all from the beginning
+      res, err := pullLogBlock(logReq, 0, logReq.TotalHits)
+      if err != nil {
+        return err
+      }
+
+      writeLogBlock(res, w)
+      flusher.Flush()
+    }
+  } else {
+    // get the last logReq.Tail number of log lines
+    from := logReq.TotalHits - logReq.Tail
+    res, err := pullLogBlock(logReq, from, logReq.Tail)
+    if err != nil {
+      return err
+    }
+
+    writeLogBlock(res, w)
+    flusher.Flush()
+  }
+
+  fmt.Println("Done pulling and writing logs")
+
+  return nil
+}
+
+func writeLogBlock(res *ElasticSearchResponse, w http.ResponseWriter) {
+  for _, hitObj := range res.Hits.Hits {
+    w.Write([]byte(hitObj.Source.Log))
+  }
+}
+
+func pullLogBlock(logReq *logRequest, from int, size int) (*ElasticSearchResponse, error) {
+  target := fmt.Sprintf("http://%s:%s/_all/fluentd/_search?q=k8s_id:/%s-*/&size=%d&from=%d", ElasticSearchHost, ElasticSearchPort, logReq.Dep, size, from)
+
+  fmt.Printf("Retrieving logs from %d to %d\n", from, from+size)
+  res, err := http.Get(target)
+  if err != nil {
+    return nil, err
+  }
+
+  if res.StatusCode < 200 && res.StatusCode >= 300 {
+    return nil, errors.New(res.Status)
+  }
+
+  // read entire elastic search response
+  body, err := ioutil.ReadAll(res.Body)
+  if err != nil {
+    return nil, err
+  }
+
+  // marshal response into ElasticSearchResponse struct
+  logRes := ElasticSearchResponse{}
+  err = json.Unmarshal(body, &logRes)
+  if err != nil {
+    return nil, err
+  }
+
+  return &logRes, nil
+}
+
+// returns total number of hits for the log query
+func probeForLogs(logReq *logRequest) (int, error) {
+  // query for deployment logs, using size=0 makes it quicker, we just want total number of hits
+  target := fmt.Sprintf("http://%s:%s/_all/fluentd/_search?q=k8s_id:/%s-*/&size=0", ElasticSearchHost, ElasticSearchPort, logReq.Dep)
+
+  fmt.Printf("Probing for logs: %v\n", logReq)
+  res, err := http.Get(target)
+  if err != nil {
+    return -1, err
+  }
+
+  if res.StatusCode < 200 && res.StatusCode >= 300 {
+    return -1, errors.New(res.Status)
+  }
+
+  // read entire elastic search response
+  body, err := ioutil.ReadAll(res.Body)
+  if err != nil {
+    return -1, err
+  }
+
+  // marshal response into ElasticSearchResponse struct
+  results := ElasticSearchResponse{}
+  err = json.Unmarshal(body, &results)
+  if err != nil {
+    return -1, err
+  }
+
+  // return total number of hits for the query
+  return results.Hits.Total, nil
 }
 
 //validateAdmin Validate the requestor is an admin in the namepace.  If returns false, the caller should halt and return.  True if the request should continue.  TODO make this cleaner
