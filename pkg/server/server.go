@@ -14,22 +14,6 @@ import (
   "github.com/30x/authsdk"
 )
 
-// Port the port the server is listening on
-var Port string
-// ElasticSearchHost is the host name of the elastic search pod
-var ElasticSearchHost string
-// ElasticSearchPort  is the port of the elastic search pod
-var ElasticSearchPort string
-// HitLimit the limit on the number of hits that can be pulled at one time
-var HitLimit int
-
-const (
-  // DefaultPort is the default port to listen
-  DefaultPort = "8000"
-  // DefaultHitLimit is the default limit on the number of hits that can be pulled at one time
-  DefaultHitLimit = 1024
-)
-
 //Server struct
 type Server struct {
 	Router http.Handler
@@ -47,24 +31,7 @@ func NewServer() (server *Server, err error) {
     Router: loggedRouter,
   }
 
-  if Port = os.Getenv("PORT"); Port == "" {
-    Port = DefaultPort
-  }
-
-  if HitLimitStr := os.Getenv("HIT_LIMIT"); HitLimitStr == "" {
-    HitLimit = DefaultHitLimit
-  } else {
-    HitLimit, err = strconv.Atoi(HitLimitStr)
-    if err != nil {
-      HitLimit = DefaultHitLimit
-    }
-  }
-
-  if ElasticSearchHost = os.Getenv("ELASTIC_SEARCH_HOST"); ElasticSearchHost == "" {
-    return nil, errors.New("No ELASTIC_SEARCH_HOST set! Cannot query for logs without this!")
-  }
-
-  ElasticSearchPort = os.Getenv("ELASTIC_SEARCH_PORT")
+  ConfigureLogPull()
 
   return server, nil
 }
@@ -89,13 +56,19 @@ func getDeploymentLogs(w http.ResponseWriter, r *http.Request) {
   logReq.Dep = pathVars["dep"]
   logReq.Namespace = logReq.Org + "-" + logReq.Env
 
-  tail, err := strconv.Atoi(r.URL.Query().Get("tail"))
+  tailStr := r.URL.Query().Get("tail")
+  if tailStr == "" {
+    tailStr = "0"
+  }
+
+  tail, err := strconv.Atoi(tailStr)
   if err != nil {
     writeErrorResponse(http.StatusBadRequest, err.Error(), w)
     return
   }
   logReq.Tail = tail
 
+  // probe elastic search for any log entries for this deployment
   total, err := probeForLogs(logReq)
   if err != nil {
     writeErrorResponse(http.StatusInternalServerError, err.Error(), w)
@@ -106,6 +79,7 @@ func getDeploymentLogs(w http.ResponseWriter, r *http.Request) {
   w.Header().Set("X-Content-Type-Options", "nosniff")
   w.WriteHeader(http.StatusOK)
 
+  // use flusher for chunked encoding
   flusher, ok := w.(http.Flusher)
   if !ok {
     writeErrorResponse(http.StatusInternalServerError, "expected http.ResponseWriter to an http.Flusher", w)
@@ -132,6 +106,7 @@ func pullAndWriteLogs(w http.ResponseWriter, flusher http.Flusher, logReq *logRe
     if logReq.TotalHits >= HitLimit {
       remaining := 0
 
+      // pull logs in chunks until we've pulled & written them all
       for remaining < logReq.TotalHits {
         res, err := pullLogBlock(logReq, HitLimit, remaining)
         if err != nil {
@@ -170,12 +145,14 @@ func pullAndWriteLogs(w http.ResponseWriter, flusher http.Flusher, logReq *logRe
   return nil
 }
 
+// writes each log line of the pulled log hits
 func writeLogBlock(res *ElasticSearchResponse, w http.ResponseWriter) {
   for _, hitObj := range res.Hits.Hits {
     w.Write([]byte(hitObj.Source.Log))
   }
 }
 
+// pulls a block of logs from 'from' until 'from+size'
 func pullLogBlock(logReq *logRequest, from int, size int) (*ElasticSearchResponse, error) {
   target := fmt.Sprintf("http://%s:%s/_all/fluentd/_search?q=k8s_id:/%s-*/&size=%d&from=%d", ElasticSearchHost, ElasticSearchPort, logReq.Dep, size, from)
 

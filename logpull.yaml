@@ -27,3 +27,13 @@ spec:
         env:
         - name: PORT
           value: "8000"
+        - name: ELASTIC_SEARCH_HOST
+          valueFrom:
+            secretKeyRef:
+              name: elastic-search-loc
+              key: host
+        - name: ELASTIC_SEARCH_PORT
+          valueFrom:
+            secretKeyRef:
+              name: elastic-search-loc
+              key: port
