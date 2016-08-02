@@ -21,7 +21,7 @@ spec:
         privatePaths: "8000:/logs"
     spec:
       containers:
-      - image: thirtyx/logpull:0.1.0
+      - image: thirtyx/logpull:0.1.1
         imagePullPolicy: Always
         name: logpull
         env:
