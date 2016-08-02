@@ -89,7 +89,8 @@ func getDeploymentLogs(w http.ResponseWriter, r *http.Request) {
   flusher.Flush()
 
   if total == 0 {
-    w.Write([]byte("There are no logs available\n"))
+    msg := fmt.Sprintf("There are no logs available for deployment %s in environment %s\n", logReq.Dep, logReq.Namespace)
+    w.Write([]byte(msg))
   } else {
     logReq.TotalHits = total
 
@@ -129,8 +130,14 @@ func pullAndWriteLogs(w http.ResponseWriter, flusher http.Flusher, logReq *logRe
       flusher.Flush()
     }
   } else {
+    var from int
     // get the last logReq.Tail number of log lines
-    from := logReq.TotalHits - logReq.Tail
+    if logReq.Tail >= logReq.TotalHits {
+      from = 0
+    } else {
+      from = logReq.TotalHits - logReq.Tail
+    }
+
     res, err := pullLogBlock(logReq, from, logReq.Tail)
     if err != nil {
       return err
@@ -154,7 +161,8 @@ func writeLogBlock(res *ElasticSearchResponse, w http.ResponseWriter) {
 
 // pulls a block of logs from 'from' until 'from+size'
 func pullLogBlock(logReq *logRequest, from int, size int) (*ElasticSearchResponse, error) {
-  target := fmt.Sprintf("http://%s:%s/_all/fluentd/_search?q=k8s_id:/%s-*/&size=%d&from=%d", ElasticSearchHost, ElasticSearchPort, logReq.Dep, size, from)
+  target := fmt.Sprintf("http://%s:%s/_all/fluentd/_search?q=k8s_id:%s-*_%s_*&size=%d&from=%d",
+    ElasticSearchHost, ElasticSearchPort, logReq.Dep, logReq.Namespace, size, from)
 
   fmt.Printf("Retrieving logs from %d to %d\n", from, from+size)
   res, err := http.Get(target)
@@ -185,7 +193,8 @@ func pullLogBlock(logReq *logRequest, from int, size int) (*ElasticSearchRespons
 // returns total number of hits for the log query
 func probeForLogs(logReq *logRequest) (int, error) {
   // query for deployment logs, using size=0 makes it quicker, we just want total number of hits
-  target := fmt.Sprintf("http://%s:%s/_all/fluentd/_search?q=k8s_id:/%s-*/&size=0", ElasticSearchHost, ElasticSearchPort, logReq.Dep)
+  target := fmt.Sprintf("http://%s:%s/_all/fluentd/_search?q=k8s_id:%s-*_%s_*&size=0",
+    ElasticSearchHost, ElasticSearchPort, logReq.Dep, logReq.Namespace)
 
   fmt.Printf("Probing for logs: %v\n", logReq)
   res, err := http.Get(target)
