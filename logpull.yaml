@@ -15,9 +15,9 @@ spec:
         name: logpull
         routable: "true"
       annotations:
-        publicHosts: "shipyard.e2e.apigee.net"
+        publicHosts: "shipyard.apigee.com"
         publicPaths: "8000:/logs"
-        privateHosts: "shipyard.e2e.apigee.net"
+        privateHosts: "shipyard.apigee.com"
         privatePaths: "8000:/logs"
     spec:
       containers:
